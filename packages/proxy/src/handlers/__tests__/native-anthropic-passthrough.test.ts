@@ -1,7 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { AnthropicProvider } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
 import { NATIVE_PASSTHROUGH_HEADER } from "../../routing/native-proxy-dispatch";
+import * as usageCollectorModule from "../../usage-collector";
 import type { ProxyContext } from "../handlers/proxy-types";
 import { proxyWithAccount } from "../proxy-operations";
 
@@ -97,6 +106,15 @@ describe("native anthropic passthrough via proxyWithAccount", () => {
 			);
 		});
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		// The usage collector is a module singleton initialized at runtime by
+		// initUsageCollector(); unit tests don't boot that path, so mock it to
+		// avoid "UsageCollector not initialized" from forwardToClient.
+		spyOn(usageCollectorModule, "getUsageCollector").mockReturnValue({
+			handleStart: mock(() => {}),
+			handleEnd: mock(() => Promise.resolve()),
+			handleChunk: mock(() => {}),
+		} as unknown as usageCollectorModule.UsageCollector);
 	});
 
 	afterEach(() => {

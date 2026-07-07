@@ -552,6 +552,20 @@ export default async function startServer(options?: {
 		sslCertPath,
 	} = options || {};
 
+	// A lone SSL key or cert is a misconfiguration. Fail loudly instead of
+	// silently downgrading to plaintext HTTP (which would leave a server the
+	// operator intended to be TLS-protected listening in the clear, and would
+	// hang a `--serve` invocation that expected to error out).
+	if (!!sslKeyPath !== !!sslCertPath) {
+		console.error("Incomplete SSL configuration", {
+			hasKey: !!sslKeyPath,
+			hasCert: !!sslCertPath,
+		});
+		throw new Error(
+			"Both an SSL key and certificate are required to enable HTTPS. Provide both --ssl-key and --ssl-cert (or neither).",
+		);
+	}
+
 	// Enable TLS if both certificate paths are provided
 	tlsEnabled = !!(sslKeyPath && sslCertPath);
 

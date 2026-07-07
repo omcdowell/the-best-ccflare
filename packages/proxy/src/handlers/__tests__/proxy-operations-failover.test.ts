@@ -1,5 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import * as usageCollectorModule from "../../usage-collector";
 import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -114,6 +123,18 @@ function jsonResponse(body: object, status: number) {
 		headers: { "Content-Type": "application/json" },
 	});
 }
+
+// The usage collector is a module singleton initialized at runtime by
+// initUsageCollector(); these unit tests don't boot that path. Mock it for
+// every case so that proxyWithAccount reaching forwardToClient on a
+// successful upstream response doesn't throw "UsageCollector not initialized".
+beforeEach(() => {
+	spyOn(usageCollectorModule, "getUsageCollector").mockReturnValue({
+		handleStart: mock(() => {}),
+		handleEnd: mock(() => Promise.resolve()),
+		handleChunk: mock(() => {}),
+	} as unknown as usageCollectorModule.UsageCollector);
+});
 
 describe("proxyWithAccount — 429 failover", () => {
 	let originalFetch: typeof globalThis.fetch;
