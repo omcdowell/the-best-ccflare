@@ -1208,10 +1208,11 @@ let _usageCollector: UsageCollector | null = null;
 export async function initUsageCollector(
 	getStorePayloads: () => boolean,
 	onSummary: (summary: RequestResponse) => void,
+	sharedDbOps?: DatabaseOperations,
 ): Promise<UsageCollector> {
 	if (_usageCollector) return _usageCollector;
 
-	const dbOps = new DatabaseOperations();
+	const dbOps = sharedDbOps ?? new DatabaseOperations();
 	// Await schema/migration setup before the collector can issue any writes.
 	// On Postgres initializeAsync() runs ensureSchemaPg/runMigrationsPg; issuing
 	// saveRequest before it resolves hits missing tables/columns, and that error

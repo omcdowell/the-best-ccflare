@@ -11,7 +11,11 @@ export type RateLimitReason =
 	/** Anthropic 529 overloaded_error with a Retry-After reset time. */
 	| "upstream_529_overloaded_with_reset"
 	/** Anthropic 529 overloaded_error with no Retry-After header; probe cooldown applied. */
-	| "upstream_529_overloaded_no_reset";
+	| "upstream_529_overloaded_no_reset"
+	/** Anthropic 429 with `overage-disabled-reason: out_of_credits` — credits/overage
+	 *  depleted for a specific model/beta (e.g. context-1m); account is NOT benched,
+	 *  request fails over. */
+	| "out_of_credits";
 
 // Usage data types for Anthropic accounts
 export interface UsageWindowData {
@@ -86,13 +90,24 @@ export interface AlibabaCodingPlanUsageData {
 	remainingDays: number | null;
 }
 
+// Usage data types for xAI/Grok accounts
+export interface XaiUsageWindow {
+	utilization: number; // 0-100 Grok Build credits utilization
+	resets_at: string | null; // ISO timestamp when available
+}
+
+export interface XaiUsageData {
+	credits: XaiUsageWindow;
+}
+
 // Combined usage data type that supports all providers
 export type FullUsageData =
 	| AnthropicUsageData
 	| NanoGPTUsageData
 	| ZaiUsageData
 	| KiloUsageData
-	| AlibabaCodingPlanUsageData;
+	| AlibabaCodingPlanUsageData
+	| XaiUsageData;
 
 // Database row types that match the actual database schema
 export interface AccountRow {
@@ -273,6 +288,7 @@ export interface AccountListItem {
 		| "alibaba-coding-plan"
 		| "codex"
 		| "qwen"
+		| "xai"
 		| "ollama"
 		| "ollama-cloud";
 	priority: number;
@@ -293,7 +309,8 @@ export interface AddAccountOptions {
 		| "anthropic-compatible"
 		| "openai-compatible"
 		| "bedrock"
-		| "openrouter";
+		| "openrouter"
+		| "xai";
 	priority?: number;
 	customEndpoint?: string;
 }

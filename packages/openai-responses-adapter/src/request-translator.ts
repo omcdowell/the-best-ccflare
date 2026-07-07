@@ -1,3 +1,8 @@
+import {
+	LATEST_HAIKU_MODEL,
+	LATEST_OPUS_MODEL,
+	LATEST_SONNET_MODEL,
+} from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
 import type {
 	AnthropicContent,
@@ -23,10 +28,10 @@ const logger = new Logger("openai-responses-adapter");
 function mapGptModelToClaudeFamily(model: string): string {
 	const lower = model.toLowerCase();
 	if (!lower.startsWith("gpt-")) return model;
-	if (lower.endsWith("-pro")) return "claude-opus-4-5";
+	if (lower.endsWith("-pro")) return LATEST_OPUS_MODEL;
 	if (lower.endsWith("-mini") || lower.endsWith("-nano"))
-		return "claude-haiku-4-5";
-	return "claude-sonnet-4-6";
+		return LATEST_HAIKU_MODEL;
+	return LATEST_SONNET_MODEL;
 }
 
 function parseArguments(args: string): unknown {
@@ -194,7 +199,8 @@ export function translateRequestToAnthropic(
 
 	// Merge developer-role blocks and req.instructions into system prompt.
 	const systemParts: string[] = [];
-	if (developerBlocks.length > 0) systemParts.push(developerBlocks.join("\n\n"));
+	if (developerBlocks.length > 0)
+		systemParts.push(developerBlocks.join("\n\n"));
 	if (req.instructions !== undefined) systemParts.push(req.instructions);
 	if (systemParts.length > 0) result.system = systemParts.join("\n\n");
 

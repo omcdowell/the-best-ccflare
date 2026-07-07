@@ -40,6 +40,14 @@ import {
 	createWorkspacesListHandler,
 } from "./handlers/agents";
 import { createAgentUpdateHandler } from "./handlers/agents-update";
+import {
+	createAlertAcknowledgeHandler,
+	createAlertsAcknowledgeAllHandler,
+	createAlertsConfigGetHandler,
+	createAlertsConfigSetHandler,
+	createAlertsHistoryHandler,
+	createAlertsStreamHandler,
+} from "./handlers/alerts";
 import { createAnalyticsHandler } from "./handlers/analytics";
 import {
 	createApiKeyDeleteHandler,
@@ -71,6 +79,11 @@ import {
 } from "./handlers/debug";
 import { createFeaturesHandler } from "./handlers/features";
 import { createHealthHandler } from "./handlers/health";
+import {
+	createAnomalyInsightsHandler,
+	createCacheInsightsHandler,
+	createContextInsightsHandler,
+} from "./handlers/insights";
 import { createLogsStreamHandler } from "./handlers/logs";
 import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
@@ -182,6 +195,14 @@ export class APIRouter {
 		const logsStreamHandler = createLogsStreamHandler();
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
+		const cacheInsightsHandler = createCacheInsightsHandler(this.context);
+		const anomalyInsightsHandler = createAnomalyInsightsHandler(this.context);
+		const contextInsightsHandler = createContextInsightsHandler(this.context);
+		const alertsHistoryHandler = createAlertsHistoryHandler(this.context);
+		const alertsConfigGetHandler = createAlertsConfigGetHandler(this.context);
+		const alertsConfigSetHandler = createAlertsConfigSetHandler(this.context);
+		const alertsAckAllHandler = createAlertsAcknowledgeAllHandler(this.context);
+		const alertsStreamHandler = createAlertsStreamHandler();
 		const oauthInitHandler = createOAuthInitHandler(dbOps);
 		const oauthCallbackHandler = createOAuthCallbackHandler(dbOps);
 		const qwenDeviceFlowInitHandler = createQwenDeviceFlowInitHandler(dbOps);
@@ -368,6 +389,31 @@ export class APIRouter {
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
 		});
+		this.handlers.set("GET:/api/insights/cache", (_req, url) =>
+			cacheInsightsHandler(url.searchParams),
+		);
+		this.handlers.set("GET:/api/insights/anomalies", (_req, url) =>
+			anomalyInsightsHandler(url.searchParams),
+		);
+		this.handlers.set("GET:/api/insights/context", (_req, url) =>
+			contextInsightsHandler(url.searchParams),
+		);
+		// Alert routes
+		this.handlers.set("GET:/api/insights/alerts", (_req, url) =>
+			alertsHistoryHandler(url.searchParams),
+		);
+		this.handlers.set("POST:/api/insights/alerts", (req) =>
+			alertsConfigSetHandler(req),
+		);
+		this.handlers.set("GET:/api/insights/alerts/config", () =>
+			alertsConfigGetHandler(),
+		);
+		this.handlers.set("POST:/api/insights/alerts/acknowledge-all", () =>
+			alertsAckAllHandler(),
+		);
+		this.handlers.set("GET:/api/insights/alerts/stream", (req) =>
+			alertsStreamHandler(req),
+		);
 		this.handlers.set("GET:/api/agents", () => agentsHandler());
 		this.handlers.set("POST:/api/agents/bulk-preference", (req) => {
 			const bulkHandler = createBulkAgentPreferenceUpdateHandler(
@@ -758,6 +804,19 @@ export class APIRouter {
 			if (parts.length === 4 && method === "DELETE") {
 				const handler = createComboDeleteHandler(this.context.dbOps);
 				return await this.wrapHandler(() => handler(comboId))(req, url);
+			}
+		}
+
+		// Alert acknowledge by ID (guard against the static acknowledge-all path)
+		if (
+			path.startsWith("/api/insights/alerts/") &&
+			method === "POST" &&
+			!path.endsWith("/acknowledge-all")
+		) {
+			const alertId = decodeURIComponent(path.split("/")[4] ?? "");
+			if (alertId) {
+				const alertAckHandler = createAlertAcknowledgeHandler(this.context);
+				return await this.wrapHandler(() => alertAckHandler(alertId))(req, url);
 			}
 		}
 

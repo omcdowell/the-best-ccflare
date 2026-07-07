@@ -29,6 +29,9 @@ function getMidStreamRateLimitCooldownMs(): number {
 	);
 }
 
+// Must match MAX_REQUEST_BODY_BYTES in usage-collector.ts.
+// Cap applied before passing to collector to avoid multi-MB copies.
+// 4MB so afterburn can see full conversation history for friction analysis.
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
 
 function extractRequestedModel(requestBody: ArrayBuffer | null): string | null {
@@ -50,6 +53,10 @@ function extractRequestedModel(requestBody: ArrayBuffer | null): string | null {
 	}
 }
 
+/**
+ * Check if a response should be considered successful/expected
+ * Treats certain well-known paths that return 404 as expected
+ */
 function isExpectedResponse(path: string, response: Response): boolean {
 	if (path.startsWith("/.well-known/") && response.status === 404) {
 		return true;
@@ -111,13 +118,20 @@ export async function forwardToClient(
 	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
 	const loggedPath = clientPath ?? path;
 
+	// Filter out:
+	//   - count_tokens requests on providers that synthesize or proxy advisory
+	//     token counts; these aren't billable user traffic.
+	//   - synthetic auto-refresh probes (issue #199, bug 2). Logging these
+	//     pollutes the user-visible 503/200 metrics on the dashboard with
+	//     internal scheduler activity. Header set by AutoRefreshScheduler
+	//     mirrors the existing keepalive pattern.
 	const isAutoRefreshProbe =
 		requestHeaders.get("x-better-ccflare-auto-refresh") === "true";
-	const shouldProcessRequest =
-		!(
-			ctx.provider.name === "openai-compatible" &&
-			path === "/v1/messages/count_tokens"
-		) && !isAutoRefreshProbe;
+	const isSyntheticCountTokens =
+		path === "/v1/messages/count_tokens" &&
+		(ctx.provider.name === "openai-compatible" ||
+			ctx.provider.name === "codex");
+	const shouldProcessRequest = !isSyntheticCountTokens && !isAutoRefreshProbe;
 
 	if (shouldProcessRequest) {
 		const requestedModel = extractRequestedModel(requestBody);
@@ -204,22 +218,25 @@ export async function forwardToClient(
 
 		const onClose = (_buffered: Uint8Array[]): void => {
 			if (shouldProcessRequest) {
-				fireAndForgetEnd({
+				const endMsg: EndMessage = {
 					type: "end",
 					requestId,
 					success: isExpectedResponse(path, response),
-				});
+				};
+				// Fire-and-forget: handleEnd is async for DB writes but we don't block streaming
+				fireAndForgetEnd(endMsg);
 			}
 		};
 
 		const onError = (err: Error): void => {
 			if (shouldProcessRequest) {
-				fireAndForgetEnd({
+				const endMsg: EndMessage = {
 					type: "end",
 					requestId,
 					success: false,
 					error: err.message,
-				});
+				};
+				fireAndForgetEnd(endMsg);
 			}
 		};
 

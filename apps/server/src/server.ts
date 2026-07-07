@@ -21,9 +21,10 @@ import {
 	DatabaseFactory,
 	initPayloadEncryption,
 } from "@better-ccflare/database";
-import { APIRouter, AuthService } from "@better-ccflare/http-api";
+import { AlertService, APIRouter, AuthService } from "@better-ccflare/http-api";
 import {
 	LeastUsedStrategy,
+	SessionAffinityStrategy,
 	SessionStrategy,
 } from "@better-ccflare/load-balancer";
 import { Logger } from "@better-ccflare/logger";
@@ -81,6 +82,8 @@ function buildStrategy(
 	switch (name) {
 		case StrategyName.LeastUsed:
 			return new LeastUsedStrategy();
+		case StrategyName.SessionAffinity:
+			return new SessionAffinityStrategy(sessionDurationMs);
 		default:
 			return new SessionStrategy(sessionDurationMs);
 	}
@@ -114,6 +117,12 @@ try {
 const MEMORY_MONITOR_INTERVAL_MS = 60 * 1000;
 const MEMORY_GROWTH_WARN_BYTES = 512 * 1024 * 1024;
 const MEMORY_GROWTH_ERROR_BYTES = 1024 * 1024 * 1024;
+
+export function supportsRefreshBackedUsagePolling(
+	provider: string | null | undefined,
+): boolean {
+	return provider === "anthropic" || provider === "xai";
+}
 
 // Helper function to resolve dashboard assets with fallback
 function resolveDashboardAsset(assetPath: string): string | null {
@@ -670,6 +679,10 @@ export default async function startServer(options?: {
 	container.registerInstance(SERVICE_KEYS.PricingLogger, pricingLogger);
 	setPricingLogger(pricingLogger);
 
+	const alertService = new AlertService(db, config);
+	alertService.start();
+	registerDisposable({ dispose: () => alertService.stop() });
+
 	// Strategy is constructed below after RuntimeConfig is built. The router
 	// accepts a getter so it can read the live (post-hot-reload) instance.
 	let currentStrategy: LoadBalancingStrategy | null = null;
@@ -678,6 +691,7 @@ export default async function startServer(options?: {
 		db,
 		config,
 		dbOps,
+		alertService,
 		runtime: {
 			port,
 			tlsEnabled,
@@ -753,17 +767,30 @@ export default async function startServer(options?: {
 				log.info(
 					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads in ${Date.now() - startTime}ms`,
 				);
-				// Reclaim a bounded chunk of freed pages. 8000 pages × 4 KiB = ~32 MiB
-				// per tick, off-thread via the incremental-vacuum worker. Small N
-				// keeps the writer-slot hold sub-100ms on local SSD so concurrent
-				// main-thread writes (rate-limit updates, OAuth refresh, post-
-				// processor inserts) don't pile up on busy_timeout. Pre-fix this
-				// path passed 200000 and silently fell back to a full main-thread
-				// VACUUM when auto_vacuum=NONE — see incrementalVacuum() in
-				// packages/database/src/database-operations.ts.
-				dbOps.incrementalVacuum(8000).catch((err) => {
-					log.error(`Incremental vacuum error: ${err}`);
-				});
+				// Reclaim freed pages adaptively. incrementalVacuumAdaptive()
+				// scales reclaim with the current freelist: in steady state it
+				// returns a small chunk (or no-ops on an empty freelist), but
+				// after a retention *drop* — which dumps a large surplus of free
+				// pages onto the freelist — it drains that surplus over a handful
+				// of hourly ticks instead of weeks. Each underlying worker call is
+				// bounded (~64 MiB) and the per-tick total is capped (~1 GiB), with
+				// yields between chunks, so the single writer slot is never held
+				// long and concurrent main-thread writes (rate-limit updates, OAuth
+				// refresh, post-processor inserts) aren't starved. Off-thread via
+				// the incremental-vacuum worker. Fire-and-forget so the cleanup
+				// callback isn't blocked on it.
+				dbOps
+					.incrementalVacuumAdaptive()
+					.then((r) => {
+						if (r.reclaimedPages > 0) {
+							log.info(
+								`Adaptive incremental vacuum reclaimed ${r.reclaimedPages} pages in ${r.chunks} chunk(s)`,
+							);
+						}
+					})
+					.catch((err) => {
+						log.error(`Incremental vacuum error: ${err}`);
+					});
 			}
 		} catch (err) {
 			log.error(`Periodic data retention cleanup error: ${err}`);
@@ -876,9 +903,9 @@ export default async function startServer(options?: {
 			);
 			return false;
 		}
-		if (account.provider !== "anthropic") {
+		if (!supportsRefreshBackedUsagePolling(account.provider)) {
 			log.warn(
-				`Cannot restart usage polling: account ${account.name} is not an Anthropic OAuth account`,
+				`Cannot restart usage polling: account ${account.name} does not support refresh-backed usage polling`,
 			);
 			return false;
 		}
@@ -1034,6 +1061,7 @@ export default async function startServer(options?: {
 			proxyContext.strategy = strategy;
 			currentStrategy = strategy;
 		}
+		// store_payloads changes are picked up automatically via the getStorePayloads getter
 	});
 
 	// Main server
@@ -1369,15 +1397,21 @@ Available endpoints:
 		);
 	}
 
-	// Start usage polling for Anthropic accounts with token refresh (regardless of paused status)
-	const anthropicAccounts = accounts.filter((a) => a.provider === "anthropic");
-	if (anthropicAccounts.length > 0) {
+	// Start usage polling for refresh-backed providers (regardless of paused status).
+	// Anthropic polls Claude quota windows; xAI polls Grok Build credits via
+	// grok.com gRPC-web and may need to refresh an expired imported Grok CLI token
+	// before the first usage fetch.
+	const refreshBackedUsageAccounts = accounts.filter((a) =>
+		supportsRefreshBackedUsagePolling(a.provider),
+	);
+	if (refreshBackedUsageAccounts.length > 0) {
 		log.info(
-			`Found ${anthropicAccounts.length} Anthropic accounts, starting usage polling...`,
+			`Found ${refreshBackedUsageAccounts.length} refresh-backed usage account(s), starting usage polling...`,
 		);
-		for (const [index, account] of anthropicAccounts.entries()) {
-			log.debug(`Processing account: ${account.name}`, {
+		for (const [index, account] of refreshBackedUsageAccounts.entries()) {
+			log.debug(`Processing usage account: ${account.name}`, {
 				accountId: account.id,
+				provider: account.provider,
 				hasAccessToken: !!account.access_token,
 				hasRefreshToken: !!account.refresh_token,
 				paused: account.paused,
@@ -1387,9 +1421,9 @@ Available endpoints:
 			});
 
 			if (account.access_token || account.refresh_token) {
-				// Start usage polling with token refresh capability
-				// Usage data fetching should work independently of account paused status
-				// Stagger startup by 5s per account to avoid simultaneous 429s on boot
+				// Start usage polling with token refresh capability.
+				// Usage data fetching should work independently of account paused status.
+				// Stagger startup by 5s per account to avoid simultaneous rate-limit bursts.
 				const startupDelayMs = index * 5000;
 				startUsagePollingWithRefresh(
 					account,
@@ -1398,7 +1432,7 @@ Available endpoints:
 					config.getUsagePollIntervalMs(),
 				);
 				log.info(
-					`Started usage polling for account ${account.name}${startupDelayMs > 0 ? ` (delayed ${startupDelayMs / 1000}s)` : ""}`,
+					`Started usage polling for ${account.provider} account ${account.name}${startupDelayMs > 0 ? ` (delayed ${startupDelayMs / 1000}s)` : ""}`,
 				);
 			} else {
 				log.warn(
@@ -1407,7 +1441,9 @@ Available endpoints:
 			}
 		}
 	} else {
-		log.info(`No Anthropic accounts found, usage polling will not start`);
+		log.info(
+			`No refresh-backed usage accounts found, usage polling will not start`,
+		);
 	}
 
 	// Start usage polling for NanoGPT accounts (PayG with optional subscription tracking)

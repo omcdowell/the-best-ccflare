@@ -3,9 +3,11 @@ import {
 	ServiceUnavailableError,
 	trackClientVersion,
 } from "@better-ccflare/core";
+import { DatabaseFactory } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
 import { usageCache } from "@better-ccflare/providers";
 import type { Account } from "@better-ccflare/types";
+import { cacheBodyStore } from "./cache-body-store";
 import {
 	createPoolExhaustedResponse,
 	createRequestMetadata,
@@ -104,9 +106,13 @@ function extractProjectFromRequest(
 export async function initProxy(
 	getStorePayloads: () => boolean,
 ): Promise<void> {
-	await initUsageCollector(getStorePayloads, (summary) => {
-		requestEvents.emit("event", { type: "summary", payload: summary });
-	});
+	await initUsageCollector(
+		getStorePayloads,
+		(summary) => {
+			requestEvents.emit("event", { type: "summary", payload: summary });
+		},
+		DatabaseFactory.getInstance(),
+	);
 }
 
 export async function drainUsageCollector(): Promise<void> {
@@ -254,7 +260,11 @@ export async function handleProxy(
 					originalModel: null,
 					appliedModel: null,
 				}
-			: await interceptAndModifyRequest(requestBodyContext, ctx.dbOps);
+			: await interceptAndModifyRequest(
+					requestBodyContext,
+					ctx.dbOps,
+					req.headers,
+				);
 
 	// Use modified body if available
 	const finalBodyBuffer = modifiedBody || requestBodyContext.getBuffer();
@@ -281,6 +291,7 @@ export async function handleProxy(
 	} else if (options?.clientPath) {
 		requestMeta.routingMode = "compatibility";
 	}
+	requestMeta.clientSessionId = requestBodyContext.getClientId();
 
 	// 6. Select accounts
 	const selectedAccounts = await selectAccountsForRequest(
@@ -370,6 +381,7 @@ export async function handleProxy(
 		const isAutoRefreshProbe =
 			req.headers.get("x-better-ccflare-auto-refresh") === "true";
 		if (!isAutoRefreshProbe) {
+			// Log to request history via usage collector
 			getUsageCollector().handleStart({
 				type: "start",
 				messageId: crypto.randomUUID(),
@@ -533,6 +545,7 @@ export async function handleProxy(
 				}
 			}
 		} else if (throttledFallbackAccounts.length > 0) {
+			cacheBodyStore.discardStaged(requestMeta.id);
 			return createUsageThrottledResponse(throttledFallbackAccounts);
 		}
 	}
@@ -554,12 +567,14 @@ export async function handleProxy(
 					`bun run cli --reauthenticate "${acc.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
 			)
 			.join("\n  ");
+		cacheBodyStore.discardStaged(requestMeta.id);
 		throw new ServiceUnavailableError(
 			`All accounts failed to proxy the request. OAuth tokens have expired for accounts: ${needsReauth.map((acc) => acc.name).join(", ")}.\n\nPlease re-authenticate:\n  ${reauthCommands}`,
 			ctx.provider.name,
 		);
 	}
 
+	cacheBodyStore.discardStaged(requestMeta.id);
 	throw new ServiceUnavailableError(
 		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`,
 		ctx.provider.name,

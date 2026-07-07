@@ -24,6 +24,8 @@ export interface RequestMeta {
 	upstreamPath?: string | null;
 	/** How the request was routed through the proxy */
 	routingMode?: RequestRoutingMode | null;
+	/** Per-client session id (from request body metadata.user_id) for session-affinity routing. */
+	clientSessionId?: string | null;
 }
 
 export interface AgentUpdatePayload {
